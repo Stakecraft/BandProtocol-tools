@@ -1,0 +1,167 @@
+---
+- hosts: "{{ NODE_GROUP }}"
+  become: yes
+  vars:
+    ansible_ssh_port: '{{ default_ssh_port }}'
+    ansible_ssh_user: '{{ default_user }}'
+    sudo_user:
+      - login: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+
+  tasks:
+    - name: make sure we have a 'sudo' group
+      group:
+        name: sudo
+        state: present
+
+    - name: change group sudo to passwordless
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^%sudo'
+        line: '%sudo ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+
+    - name: create a login user
+      user:
+        name: "{{ item.login }}"
+        groups:
+          - sudo
+        state: present
+        shell: /bin/bash
+        system: no
+        createhome: yes
+        home: /home/{{ item.login }}
+      with_items: "{{ sudo_user }}"    
+
+    - name: add .ssh directories
+      file:
+        path=/home/{{ item.login }}/.ssh
+        state=directory
+        mode=0700
+        owner={{ item.login }}
+        group={{ item.group|default(item.login)  }}
+      with_items: "{{ sudo_user }}"
+
+    - name: create authorized_keys file
+      file: path=/home/{{ item.login }}/.ssh/authorized_keys state=touch mode=0644
+      with_items: "{{ sudo_user }}"
+
+    - name: copy key from root to {{ ansible_user }}
+      copy:
+        src: "/root/.ssh/authorized_keys"
+        dest: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+        remote_src: yes
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0644'
+
+    # - name: Go Repository
+    #   apt_repository:
+    #     repo: ppa:longsleep/golang-backports
+    #     mode: '0666'
+
+    - name: required system packages installation
+      apt: 
+        name: ['git', 'curl', 'build-essential', 'jq', 'golang-go', 'fail2ban'] 
+        state: latest 
+        update_cache: yes
+    
+    - name: fail if port is undefined
+      fail:
+        msg: Port variable undefined. Please add the variable 'ssh_port' via the extravars argument.
+      when: custom_ssh_port is undefined
+
+    - name: ssh port update
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: '^Port'
+        line: Port {{ custom_ssh_port }}
+        validate: '/usr/sbin/sshd -T -f %s'
+        backup: yes
+
+    - name: updating login grace time
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: '^LoginGraceTime'
+        line: LoginGraceTime 60
+        validate: '/usr/sbin/sshd -T -f %s'
+
+    - name: disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: '^PermitRootLogin'
+        line: PermitRootLogin no
+        validate: '/usr/sbin/sshd -T -f %s'
+
+    - name: disable x11 forwarding
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: '^X11Forwarding'
+        line: X11Forwarding no
+        validate: '/usr/sbin/sshd -T -f %s'
+
+    - name: setting concurrent connections to 2
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: '^MaxStartups'
+        line: MaxStartups 2
+        validate: '/usr/sbin/sshd -T -f %s'
+    
+    - name: sshd service restart
+      systemd:
+        name: sshd
+        state: restarted
+        enabled: yes
+
+    - name: fail2ban copy the .conf configuration template to .local file
+      copy:
+        src: /etc/fail2ban/jail.conf
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: 0644
+        remote_src: yes
+
+    - name: fail2ban port update
+      replace:
+        path: /etc/fail2ban/jail.local
+        regexp: '^port\s*=\s*ssh'
+        replace: "port = {{ custom_ssh_port }}"
+        backup: yes
+
+    - name: fail2ban service restart
+      systemd:
+        name: fail2ban
+        state: restarted
+        enabled: yes
+
+    - name: setup firewall for p2p
+      ufw:
+        rule: allow
+        port: '{{ p2p_port }}'
+        proto: tcp
+
+    - name: setup firewall for ssh
+      ufw:
+        rule: allow
+        port: '{{ custom_ssh_port }}'
+        proto: tcp
+    
+    - name: setup firewall for prometheus
+      when: enable_prometheus == "true"
+      ufw:
+        rule: allow
+        src: '{{ prometheus_ip }}'
+        port: '{{ prometheus_port }}'
+        proto: tcp
+
+    - name: Enable ufw
+      ufw:
+        state: enabled
+        policy: allow

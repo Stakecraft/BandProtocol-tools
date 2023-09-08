@@ -1,0 +1,158 @@
+---
+- hosts: all
+  vars:
+    ansible_ssh_port: '{{ custom_ssh_port }}'
+    ansible_ssh_user: '{{ ansible_user }}'
+  tasks:
+    - name: clone node repo
+      git:
+        repo: '{{ repo }}'
+        dest: '/home/{{ ansible_user }}/chain'
+        version: '{{ node_version }}'
+        update: yes
+        force: yes
+        recursive: no
+
+    - name: install node binary
+      command: '{{ item }}'
+      args:
+        chdir: '/home/{{ ansible_user }}/chain'
+      with_items:
+        - 'git checkout {{ band_version }} && make install'
+      environment:
+        PATH: '{{ path }}'
+        GOPATH: '/home/{{ ansible_user }}/go'
+
+    - name: copy binary file to bin directory
+      copy:
+        src: '/home/{{ ansible_user }}/go/bin/{{ binary_name }}'
+        dest: '{{ go_bin }}'
+        remote_src: true
+        mode: '0755'
+
+    - name: copy yoda file to bin directory
+      copy:
+        src: '/home/{{ ansible_user }}/go/bin/yoda'
+        dest: '{{ go_bin }}'
+        remote_src: true
+        mode: '0755'
+
+    - name: check bandd version
+      shell: "{{ go_bin }}/{{ binary_name }} version"
+      register: shell_result
+
+    - debug:
+        var: shell_result.stderr_lines
+
+    - name: check yoda version
+      shell: "{{ go_bin }}/yoda version"
+      register: shell_result
+
+    - debug:
+        var: shell_result.stderr_lines
+    
+    - name: remove old Genesis
+      file:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/genesis.json"
+        state: absent
+
+    - name: init band chain
+      shell: "{{ go_bin }}/{{ binary_name }} init --chain-id laozi-mainnet {{ moniker }}"
+      register: node_id
+
+    - debug:
+        var: node_id.stdout_lines
+
+    - name: download genesis file
+      get_url:
+        url: "{{ genesis }}"
+        dest: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/genesis.json"
+        force: yes
+
+    - name: add seeds
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'seeds = .*$'
+        replace: 'seeds = "{{ seeds }}"'
+
+    - name: add persistent peers
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'persistent_peers = .*$'
+        replace: 'persistent_peers = "{{ persistent_peers }}"'
+
+    - name: add private peers
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'private_peer_ids = .*$'
+        replace: 'private_peer_ids = "{{ private_peer_ids }}"'
+
+    - name: changing addr_book in config.toml
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'addr_book_strict = .*$'
+        replace: 'addr_book_strict = false'   
+
+    - name: changing seed_mode in config.toml
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'seed_mode = .*$'
+        replace: 'seed_mode = false' 
+
+    - name: changing pex for private sentry in config.toml
+      when: SENTRY_TYPE == "private"
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: 'pex = .*$'
+        replace: 'pex = false'
+
+    - name: enable prometheus in config.toml
+      when: enable_prometheus == "true"
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/config.toml"
+        regexp: '^prometheus = .*$'
+        replace: 'prometheus = true' 
+
+    - name: patch gas price to app.toml
+      replace:
+        path: "/home/{{ ansible_user }}/{{ chain_homedir }}/config/app.toml"
+        regexp: 'minimum-gas-prices = .*$'
+        replace: 'minimum-gas-prices = "0.025uband"'
+
+    - name: unsafe-reset-all before start
+      shell: "{{ go_bin }}/{{ binary_name }} unsafe-reset-all"
+
+    - name: install systemd unit file
+      become: yes
+      template: 
+        src: "{{ binary_name }}.j2"
+        dest: "{{ systemd_path }}/{{ binary_name }}.service"
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0666'
+
+    - name: install systemd unit file
+      become: yes
+      template: 
+        src: yoda.j2 
+        dest: "{{ systemd_path }}/yoda.service"
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0666'
+
+    - name: start service
+      become: yes
+      systemd:
+        name: '{{ binary_name }}'
+        state: started
+        enabled: yes
+
+    - name: start service
+      become: yes
+      systemd:
+        name: yoda
+        state: started
+        enabled: yes
+
+
+
